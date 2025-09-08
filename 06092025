@@ -29,6 +29,9 @@ packages <- c(
 
 invisible(lapply(packages, library, character.only = TRUE))
 
+if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+BiocManager::install("multiMiR")
+
 align_samples <- function(cel_files, pheno) {
   sample_names <- basename(cel_files)
   pheno_df <- as.data.frame(pheno, stringsAsFactors = FALSE)
@@ -49,8 +52,8 @@ align_samples <- function(cel_files, pheno) {
 pkgbuild::has_build_tools(debug = TRUE)
 
 args <- commandArgs(trailingOnly = TRUE)
-FDR_THRESH   <- if (length(args) >= 1) as.numeric(args[1]) else 0.05
-LOGFC_THRESH <- if (length(args) >= 2) as.numeric(args[2]) else 1
+FDR_THRESH   <- if (length(args) >= 1) as.numeric(args[1]) else 0.1
+LOGFC_THRESH <- if (length(args) >= 2) as.numeric(args[2]) else 0.5
 
 # ---- utils: NULL-coalescing ve güvenli multiMiR çekici ----
 `%||%` <- function(x, y) if (is.null(x)) y else x
@@ -370,6 +373,7 @@ gsea_h <- clusterProfiler::GSEA(
 ## 5) KEGG GSEA (ENTREZ)
 ## 5) KEGG GSEA (ENTREZ) — SAĞLAM BLOK
 # ==== KEGG GSEA (ENTREZ) — TEMİZ BLOK ====
+
 suppressPackageStartupMessages({
   library(dplyr); library(AnnotationDbi); library(hgu133plus2.db)
   library(clusterProfiler)
@@ -377,7 +381,7 @@ suppressPackageStartupMessages({
 
 #0tt_gene yoksa, tt ve anotasyonla üret
 
- if (!exists("tt_gene")) {
+if (!exists("tt_gene")) {
   stopifnot(exists("tt"), nrow(tt) > 0)
   tt$PROBEID <- rownames(tt)
   ann <- AnnotationDbi::select(hgu133plus2.db,
@@ -478,9 +482,6 @@ names(formals(multiMiR::get_multimir))
 curl::has_internet()
 #length(universe_set) #NEDEN ÇALIŞMADI BUL
 try(multiMiR::get_multimir(org="hsa", target="TP53", table="validated", summary=FALSE))
-
-if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
-BiocManager::install("multiMiR")
 
 suppressPackageStartupMessages({ library(multiMiR); library(dplyr); library(R.utils) })
 
@@ -1569,7 +1570,7 @@ map_sym_to_entrez <- function(sym) {
   ranks_vec <- sort(as.numeric(ranks_vec), decreasing = TRUE)
   names(ranks_vec) <- names(tapply(ranks_tbl$score, ranks_tbl$SYMBOL, c))
   
-  term2gene_H <- msigdbr(species="Homo sapiens", category="H") |>
+  term2gene_H <- msigdbr(species="Homo sapiens", collection = "H") |>
     transmute(term = gs_name, gene = toupper(gene_symbol)) |> distinct()
   common_H <- intersect(names(ranks_vec), term2gene_H$gene)
   gsea_h <- GSEA(geneList = ranks_vec[common_H],
@@ -1586,7 +1587,7 @@ map_sym_to_entrez <- function(sym) {
 
 # --- BioCarta ssGSEA (örnek-bazlı) + ısı haritası ---
 {
-  bc_t2g <- msigdbr(species="Homo sapiens", category="C2", subcategory="CP:BIOCARTA") |>
+  bc_t2g <- msigdbr(species="Homo sapiens", collection = "C2", collection = "CP:BIOCARTA") |>
     transmute(term = gs_name, gene = toupper(gene_symbol)) |> split(.$gene, .$term)
   # GSVA ssGSEA: gene-level (SYMBOL) gerektirir
   eset <- as.matrix(expr_gene)
@@ -1713,7 +1714,7 @@ if (RUN_MIR) {
 # ============================================================
 {
   # Hallmark setleri ile örnek bazlı skor
-  hm_t2g <- msigdbr(species="Homo sapiens", category="H") |>
+  hm_t2g <- msigdbr(species="Homo sapiens", collection = "H") |>
     transmute(term = gs_name, gene = toupper(gene_symbol)) |> split(.$gene, .$term)
   ssg_h <- GSVA::gsva(as.matrix(expr_gene), hm_t2g, method = "ssgsea", ssgsea.norm = TRUE, verbose = FALSE)
   
@@ -1768,8 +1769,8 @@ Aşağıdaki mini bloklar senin mevcut boru hattınla uyumlu (ör: tt_sym, deg, 
 2.a) İmzanı (up/down genler) LINCS L1000 ile eşleştir (ilaç önerisi)
 
 Sen zaten msigdbr kullanıyorsun; CP:LINCS setleriyle enricher yapıp “UP’ı DOWN’la, DOWN’u UP’la” eşleştir:
-
-Sen zaten msigdbr kullanıyorsun; CP:LINCS setleriyle enricher yapıp “UP’ı DOWN’la, DOWN’u UP’la” eşleştir:
+  
+  Sen zaten msigdbr kullanıyorsun; CP:LINCS setleriyle enricher yapıp “UP’ı DOWN’la, DOWN’u UP’la” eşleştir:
   
   library(msigdbr); library(clusterProfiler); library(dplyr); library(stringr)
 
@@ -1827,3 +1828,69 @@ head(pred)   # ilaç bazında tahminler (AUC/IC50 ölçeği)
 
 Not: Bu yaklaşım “cell line’da test edilmiş gibi” bir in-silico tahmindir; gerçek ıslak-lab doğrulaması değildir.
 
+
+
+
+
+
+######################################################################################################
+
+## ====================
+## GO Analizi (enrichGO)
+## ====================
+
+# Gerekli paketler
+suppressPackageStartupMessages({
+  library(clusterProfiler)
+  library(org.Hs.eg.db)
+  library(dplyr)
+})
+
+# Anlamlı genlerin (adj.P.Val < 0.05) SYMBOL listesini hazırla
+sig_genes <- tt_gene %>%
+  filter(adj.P.Val < 0.05, !is.na(SYMBOL), nzchar(SYMBOL)) %>%
+  pull(SYMBOL) %>%
+  unique() %>%
+  toupper()
+
+# SYMBOL -> ENTREZ ID dönüşümü (GO analizi için)
+eg <- AnnotationDbi::select(org.Hs.eg.db, keys = sig_genes,
+                            keytype = "SYMBOL", columns = "ENTREZID")
+eg_ids <- unique(na.omit(eg$ENTREZID))
+
+# Arka plan evreni oluştur (tüm test edilen genler)
+bg_genes <- tt_gene %>%
+  filter(!is.na(SYMBOL), nzchar(SYMBOL)) %>%
+  pull(SYMBOL) %>%
+  unique() %>%
+  toupper()
+bg_eg <- AnnotationDbi::select(org.Hs.eg.db, keys = bg_genes,
+                               keytype = "SYMBOL", columns = "ENTREZID")
+bg_ids <- unique(na.omit(bg_eg$ENTREZID))
+
+# enrichGO (BP – Biological Process)
+ego_bp <- enrichGO(
+  gene          = eg_ids,
+  universe      = bg_ids,
+  OrgDb         = org.Hs.eg.db,
+  keyType       = "ENTREZID",
+  ont           = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.2,
+  readable      = TRUE
+)
+
+# Sonuçları kaydet
+if (!is.null(ego_bp) && nrow(as.data.frame(ego_bp)) > 0) {
+  write.csv(as.data.frame(ego_bp), file = file.path(root_dir, "results", "GO_enrich_BP.csv"), row.names = FALSE)
+}
+
+# Görsel (ilk 20 yol)
+if (!is.null(ego_bp) && nrow(as.data.frame(ego_bp)) > 0) {
+  library(enrichplot)
+  pgo <- barplot(ego_bp, showCategory = 20, title = "GO BP Enrichment")
+  ggsave(filename = file.path(root_dir, "results", "GO_enrich_BP_barplot.png"), plot = pgo, width = 8, height = 6)
+}
+
+################################################################################################################
