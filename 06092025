@@ -586,13 +586,13 @@ cat("QC ve analiz blokları tamamlandı.\n")
 ## Girdi varsayımları: 'tt_gene' (SYMBOL, adj.P.Val) mevcut.
 ## ===========================================================
 
-suppressPackageStartupMessages({
-  library(multiMiR)
-  library(AnnotationDbi)
-  library(org.Hs.eg.db)
-  library(dplyr); library(stringr)
-  library(ggplot2); library(igraph); library(ggraph); library(pheatmap)
-})
+#suppressPackageStartupMessages({
+#  library(multiMiR)
+#  library(AnnotationDbi)
+#  library(org.Hs.eg.db)
+#  library(dplyr); library(stringr)
+#  library(ggplot2); library(igraph); library(ggraph); library(pheatmap)
+#})
 
 ## ---------- 0) SIG genleri güvenle hazırla ----------
 if (!exists("tt_gene")) {
