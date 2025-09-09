@@ -381,7 +381,7 @@ suppressPackageStartupMessages({
 
 #0tt_gene yoksa, tt ve anotasyonla üret
 
-if (!exists("tt_gene")) {
+ if (!exists("tt_gene")) {
   stopifnot(exists("tt"), nrow(tt) > 0)
   tt$PROBEID <- rownames(tt)
   ann <- AnnotationDbi::select(hgu133plus2.db,
@@ -503,8 +503,8 @@ suppressPackageStartupMessages({ library(multiMiR); library(dplyr); library(R.ut
 get_validated_mm <- function(targets,
                              # bu kaynaklara sonradan 'database' ile filtre uygular
                              sources = c("mirtarbase","mirecords","tarbase"),
-                             chunk_size = 50,
-                             timeout_sec = 120) {
+                             chunk_size = 10,
+                             timeout_sec = 1000) {
   tg <- unique(na.omit(toupper(as.character(targets))))
   if (!length(tg)) return(NULL)
   
@@ -553,7 +553,7 @@ get_validated_mm <- function(targets,
 universe_set <- unique(tt_gene$SYMBOL[!is.na(tt_gene$SYMBOL) & tt_gene$adj.P.Val < FDR_THRESH])
 universe_set <- toupper(universe_set)
 
-mm_val <- get_validated_mm(universe_set, chunk_size = 50, timeout_sec = 120)
+mm_val <- get_validated_mm(universe_set, chunk_size = 10, timeout_sec = 1000)
 
 if (is.null(mm_val) || !nrow(mm_val)) {
   message("Validated sonuc gelmedi (ag/surum k olabilir).")
@@ -615,10 +615,10 @@ if (!exists("tt_gene")) {
     ungroup()
 }
 
-sig_genes <- tt_gene |> filter(adj.P.Val < 0.05, !is.na(SYMBOL), nzchar(SYMBOL)) |> pull(SYMBOL) |> unique()
+sig_genes <- tt_gene |> filter(adj.P.Val < 0.1, !is.na(SYMBOL), nzchar(SYMBOL)) |> pull(SYMBOL) |> unique()
 sig_genes <- toupper(na.omit(sig_genes))
 if (length(sig_genes) == 0L) {
-  warning("Predicted blok atlandı: adj.P.Val < 0.05 ile anlamlı gen yok.")
+  warning("Predicted blok atlandı: adj.P.Val < 0.1 ile anlamlı gen yok.")
 }
 
 ## ---------- 1) multiMiR çıktısını güvenle df'e çeviren yardımcı ----------
@@ -644,41 +644,64 @@ extract_predicted_df <- function(mm) {
 }
 
 ## ---------- 2) TargetScan hariç predicted sorgu ----------
-get_predicted_no_targetscan <- function(target_vec,
-                                        sites = c("diana_microt","elmmo","microcosm",
-                                                  "miranda","mirdb","pictar","pita")) {
-  tries <- list(
-    sites,
-    c("mirdb","miranda","pita"),
-    "mirdb"
-  )
-  for (ss in tries) {
-    res <- try(
-      multiMiR::get_multimir(
-        org = "hsa",
-        target = target_vec,
-        table  = "predicted",
-        predicted.site = ss,          # TargetScan YOK
-        predicted.cutoff.type = "p",
-        predicted.cutoff      = 1.0,  # gevşek eşik (daha çok kayıt)
-        summary    = FALSE,
-        legacy.out = TRUE
-      ),
-      silent = TRUE
+## ---------- 2) TargetScan hariç predicted sorgu (chunk ve timeout'lu) ----------
+get_predicted_no_targetscan_chunked <- function(target_vec,
+                                                chunk_size = 50,
+                                                timeout_sec = 120,
+                                                sites = c("diana_microt","elmmo","microcosm","miranda","mirdb","pictar","pita")) {
+  target_vec <- unique(na.omit(toupper(as.character(target_vec))))
+  if (!length(target_vec)) return(NULL)
+  idx <- split(seq_along(target_vec), ceiling(seq_along(target_vec) / chunk_size))
+  out <- vector("list", length(idx))
+  for (i in seq_along(idx)) {
+    sub <- target_vec[idx[[i]]]
+    message(sprintf("[predicted] chunk %d/%d (n=%d)", i, length(idx), length(sub)))
+    tries <- list(
+      sites,
+      c("mirdb","miranda","pita"),
+      "mirdb"
     )
-    if (!inherits(res, "try-error")) {
-      df <- try(extract_predicted_df(res), silent = TRUE)
-      if (!inherits(df, "try-error") && !is.null(df) && nrow(df) > 0) return(df)
+    res <- NULL
+    for (ss in tries) {
+      res <- try(
+        R.utils::withTimeout(
+          multiMiR::get_multimir(
+            org = "hsa",
+            target = sub,
+            table = "predicted",
+            predicted.site = ss,
+            predicted.cutoff.type = "p",
+            predicted.cutoff      = 1.0,
+            summary    = FALSE,
+            legacy.out = TRUE
+          ),
+          timeout = timeout_sec, onTimeout = "silent"
+        ),
+        silent = TRUE
+      )
+      if (!inherits(res, "try-error") && !is.null(res)) {
+        df <- try(extract_predicted_df(res), silent = TRUE)
+        if (!inherits(df, "try-error") && !is.null(df) && nrow(df) > 0) {
+          out[[i]] <- df
+          break
+        }
+      }
     }
+    if (is.null(out[[i]])) message(sprintf("  ↳ predicted tablo chunk %d boş.", i))
   }
-  return(NULL)
+  tab <- dplyr::bind_rows(Filter(Negate(is.null), out))
+  if (!nrow(tab)) {
+    message("Predicted sorgusu sonucunda tablo tamamen boş döndü!")
+    return(NULL)
+  }
+  tab
 }
 
 ## ---------- 3) Sorgu: önce SYMBOL, boşsa ENTREZ fallback ----------
 mm_net_predicted <- NULL
 if (length(sig_genes) > 0) {
   genes_sym <- unique(na.omit(toupper(as.character(sig_genes))))
-  mm_net_predicted <- get_predicted_no_targetscan(genes_sym)
+  mm_net_predicted <- get_predicted_no_targetscan_chunked(genes_sym)
   
   if (is.null(mm_net_predicted) || nrow(mm_net_predicted) == 0) {
     # ENTREZID'a düş
@@ -686,7 +709,7 @@ if (length(sig_genes) > 0) {
                                        keytype = "SYMBOL", columns = "ENTREZID")
     genes_ent <- unique(na.omit(as.character(map_ent$ENTREZID)))
     if (length(genes_ent)) {
-      mm_net_predicted <- get_predicted_no_targetscan(genes_ent)
+      mm_net_predicted <- get_predicted_no_targetscan_chunked(genes_ent)
       # ENTREZ döndüyse okunabilirlik için SYMBOL ekle
       if (!is.null(mm_net_predicted) && nrow(mm_net_predicted) > 0 &&
           "target_entrez" %in% names(mm_net_predicted) &&
@@ -824,10 +847,10 @@ message(">> Predicted (TargetScan hariç) miRNA–hedef bloğu tamamlandı.")
 ## Varsayımlar: 'tt_gene' mevcut ve en azından 'SYMBOL' ve 'adj.P.Val' içeriyor.
 
 # 1) Evren ve anlamlı genler
-sig_genes <- unique(tt_gene$SYMBOL[!is.na(tt_gene$SYMBOL) & tt_gene$adj.P.Val < 0.05])
+sig_genes <- unique(tt_gene$SYMBOL[!is.na(tt_gene$SYMBOL) & tt_gene$adj.P.Val < 0.1])
 
 if (length(sig_genes) == 0) {
-  message("multiMiR atlandı: adj.P.Val < 0.05 ile anlamlı gen yok.")
+  message("multiMiR atlandı: adj.P.Val < 0.1 ile anlamlı gen yok.")
   mm_net_df <- NULL
 } else {
   # 2) Korumalı wrapper: safe_multimir_table yoksa multiMiR ile çek
@@ -1769,8 +1792,8 @@ Aşağıdaki mini bloklar senin mevcut boru hattınla uyumlu (ör: tt_sym, deg, 
 2.a) İmzanı (up/down genler) LINCS L1000 ile eşleştir (ilaç önerisi)
 
 Sen zaten msigdbr kullanıyorsun; CP:LINCS setleriyle enricher yapıp “UP’ı DOWN’la, DOWN’u UP’la” eşleştir:
-  
-  Sen zaten msigdbr kullanıyorsun; CP:LINCS setleriyle enricher yapıp “UP’ı DOWN’la, DOWN’u UP’la” eşleştir:
+
+Sen zaten msigdbr kullanıyorsun; CP:LINCS setleriyle enricher yapıp “UP’ı DOWN’la, DOWN’u UP’la” eşleştir:
   
   library(msigdbr); library(clusterProfiler); library(dplyr); library(stringr)
 
