@@ -364,11 +364,30 @@ term2gene <- msigdbr(species = "Homo sapiens", category = "H") %>%
 common <- intersect(names(ranks), term2gene$gene)
 if (length(common) < 50) warning("GSEA için ortak gen sayısı düşük: ", length(common))
 
-gsea_h <- clusterProfiler::GSEA(
-  geneList  = ranks[common],
-  TERM2GENE = term2gene[term2gene$gene %in% common, ],
+
+# 1) Rank vektörü: t-İstatistiğine göre (abs(t) DEĞİL!)
+ranks_s <- tt_gene_s |>
+  dplyr::filter(!is.na(SYMBOL), SYMBOL != "", is.finite(t)) |>
+  dplyr::mutate(SYMBOL = toupper(SYMBOL)) |>
+  dplyr::distinct(SYMBOL, .keep_all = TRUE) |>
+  dplyr::arrange(dplyr::desc(t)) |>
+  { setNames(.$t, .$SYMBOL) }
+
+# 2) Gen setlerinde olanları al + SIRALA
+genes_in_sets <- names(ranks_s)[names(ranks_s) %in% term2gene$gene]
+geneList <- ranks_s[genes_in_sets]
+geneList <- sort(geneList, decreasing = TRUE)   # ← GSEA beklentisi
+
+# 3) TERM2GENE’yi de aynı evrene indir
+t2g <- term2gene[term2gene$gene %in% names(geneList), ]
+
+# 4) GSEA
+gsea_h_s <- clusterProfiler::GSEA(
+  geneList  = geneList,
+  TERM2GENE = t2g,
   verbose   = FALSE
 )
+
 
 ## 5) KEGG GSEA (ENTREZ)
 ## 5) KEGG GSEA (ENTREZ) — SAĞLAM BLOK
@@ -379,7 +398,7 @@ suppressPackageStartupMessages({
   library(clusterProfiler)
 })
 
-#0tt_gene yoksa, tt ve anotasyonla üret
+ #0tt_gene yoksa, tt ve anotasyonla üret
 
 if (!exists("tt_gene")) {
   stopifnot(exists("tt"), nrow(tt) > 0)
@@ -452,22 +471,97 @@ if (!is.null(gse_kegg) && nrow(as.data.frame(gse_kegg)) > 0) {
 #  labs(title = "UMAP – Kanonik ifade (RMA ± ComBat)")
 
 ## 7) (Opsiyonel) no-MELAS GSEA
-if (exists("tt_gene_s")) {
 
+#ONKONTROL
+#Eğer burada isimler farklıysa (ör. “Non.MELAS”, “Pompe” gibi), makeContrasts(Pompe - Control, …) kısmını tasarımdaki gerçek kolon adlarına göre değiştir
+# 1) Aynı örnek sırası:
+stopifnot(identical(colnames(expr_s), rownames(ph_s)))
+
+# 2) Grup faktörü ve tasarım:
+ph_s$group <- factor(ph_s$group, levels = c("Control","Pompe"))
+design_s <- model.matrix(~0 + group, data = ph_s)
+colnames(design_s)            # --> "Control"  "Pompe" görmelisin
+
+
+## ==== no-MELAS için limma → prob düzeyi → gen düzeyi (tt_gene_s) ====
+#Eğer term2gene ile kesişim düşük gelirse eşik değerini (≥50) 20–30’a çekebilirsin. 
+## ===== 7) (Opsiyonel) no-MELAS GSEA — DÜZELTİLMİŞ =====
+suppressPackageStartupMessages({ library(dplyr); library(clusterProfiler); library(enrichplot) })
+
+if (exists("tt_gene_s") && exists("term2gene")) {
+  
+  # 0) Term2gene gen isimlerini de büyük harfe çek (ranks ile aynı evren)
+  term2gene <- term2gene %>% mutate(gene = toupper(gene))
+  
+  # 1) Rank vektörü (işaretli sıralama: abs(t) DEĞİL)
   ranks_s <- tt_gene_s %>%
     filter(!is.na(SYMBOL), SYMBOL != "", is.finite(t)) %>%
-    mutate(SYMBOL = toupper(SYMBOL)) %>%
-    arrange(desc(abs(t))) %>%            # tekilleştirme yapılmışsa gerekmez
+    mutate(SYMBOL = toupper(SYMBOL), t = as.numeric(t)) %>%
+    distinct(SYMBOL, .keep_all = TRUE) %>%
+    arrange(desc(t)) %>%
     { setNames(.$t, .$SYMBOL) }
-  if (length(ranks_s) >= 50) {
-    common_s <- intersect(names(ranks_s), term2gene$gene)
-    gsea_h_s <- clusterProfiler::GSEA(
-      geneList  = ranks_s[common_s],
-      TERM2GENE = term2gene[term2gene$gene %in% common_s, ],
-      verbose   = FALSE
-    )
-  } else message("no-MELAS GSEA atlandı: yeterli rank yok.")
+  
+  # 2) Sadece gen setlerinde olanları al + AZALAN sırayı koru
+  genes_in_sets <- names(ranks_s)[names(ranks_s) %in% term2gene$gene]
+  geneList <- ranks_s[genes_in_sets]
+  geneList <- sort(geneList, decreasing = TRUE)
+  
+  # (güvenlik kontrolü)
+  stopifnot(is.numeric(geneList), length(geneList) >= 20, all(diff(unname(geneList)) <= 0))
+  
+  # 3) TERM2GENE’yi aynı evrene indir
+  t2g <- term2gene[term2gene$gene %in% names(geneList), c("term","gene")]
+  
+  # 4) GSEA
+  gsea_h_s <- clusterProfiler::GSEA(
+    geneList  = geneList,
+    TERM2GENE = t2g,
+    minGSSize = 10,          # istersen artır
+    verbose   = FALSE
+  )
+  
+  # 5) Görsel (varsa kaydet)
+  if (nrow(as.data.frame(gsea_h_s)) > 0) {
+    p_gsea_dot <- enrichplot::dotplot(gsea_h_s, showCategory = 20) +
+      labs(title = "no-MELAS GSEA — Dotplot")
+    print(p_gsea_dot)
+    if (exists("out_dir")) {
+      ggsave(file.path(out_dir, "GSEA_noMELAS_dotplot.png"),
+             p_gsea_dot, width = 7, height = 5.5, dpi = 300)
+    }
+  } else {
+    message("GSEA: anlamlı yolak çıkmadı (p.adj eşiğini/süreç evrenini kontrol et).")
+  }
+  
+} else {
+  message("GSEA atlandı: 'tt_gene_s' veya 'term2gene' yok.")
 }
+
+# (İsteğe bağlı) diske yaz
+out_dir <- get0("out_dir", ifnotfound = file.path(getwd(), "results", "deg"))
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+write.csv(tt_gene_s, file.path(out_dir, "tt_gene_noMELAS_gene_level.csv"), row.names = FALSE)
+
+# Hızlı kontrol
+cat("no-MELAS tt_gene_s hazır. Gen sayısı:", nrow(tt_gene_s), "\n")
+
+
+#if (exists("tt_gene_s")) {
+
+#  ranks_s <- tt_gene_s %>%
+#    filter(!is.na(SYMBOL), SYMBOL != "", is.finite(t)) %>%
+#    mutate(SYMBOL = toupper(SYMBOL)) %>%
+#    arrange(desc(abs(t))) %>%            # tekilleştirme yapılmışsa gerekmez
+#    { setNames(.$t, .$SYMBOL) }
+#  if (length(ranks_s) >= 50) {
+#    common_s <- intersect(names(ranks_s), term2gene$gene)
+#    gsea_h_s <- clusterProfiler::GSEA(
+#      geneList  = ranks_s[common_s],
+#      TERM2GENE = term2gene[term2gene$gene %in% common_s, ],
+#      verbose   = FALSE
+#    )
+#  } else message("no-MELAS GSEA atlandı: yeterli rank yok.")
+#}
 
 
 
@@ -583,8 +677,8 @@ if (exists("tt_gene_s") && is.data.frame(tt_gene_s) &&
   if (length(common_s) >= 50) {
     set.seed(123)
     gsea_h_s <- GSEA(
-      geneList  = ranks_s[common_s],
-      TERM2GENE = term2gene[term2gene$gene %in% common_s, ],
+      geneList  = geneList,
+      TERM2GENE = t2g,
       pvalueCutoff = 1,     # rapor amaçlı üst sınır; daha sonra filtreleyebilirsiniz
       verbose   = FALSE
     )
