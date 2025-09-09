@@ -381,7 +381,7 @@ suppressPackageStartupMessages({
 
 #0tt_gene yoksa, tt ve anotasyonla üret
 
- if (!exists("tt_gene")) {
+if (!exists("tt_gene")) {
   stopifnot(exists("tt"), nrow(tt) > 0)
   tt$PROBEID <- rownames(tt)
   ann <- AnnotationDbi::select(hgu133plus2.db,
@@ -428,31 +428,32 @@ if (!is.null(gse_kegg) && nrow(as.data.frame(gse_kegg)) > 0) {
 }
 
 ## 6) QC – PCA & UMAP (kanonik matrisle)
-pca_df <- data.frame(
-  PC1 = prcomp(t(expr_mat), scale. = TRUE)$x[,1],
-  PC2 = prcomp(t(expr_mat), scale. = TRUE)$x[,2],
-  Group = pheno_aligned$group,
-  Sample = rownames(pheno_aligned)
-)
+#pca_df <- data.frame(
+#  PC1 = prcomp(t(expr_mat), scale. = TRUE)$x[,1],
+#  PC2 = prcomp(t(expr_mat), scale. = TRUE)$x[,2],
+#  Group = pheno_aligned$group,
+#  Sample = rownames(pheno_aligned)
+#)
 
-p_pca <- ggplot(pca_df, aes(PC1, PC2, color = Group, label = Sample)) +
-  geom_point(size = 2) + theme_bw(base_size = 14) +
-  labs(title = "PCA – Kanonik ifade (RMA ± ComBat)")
+#p_pca <- ggplot(pca_df, aes(PC1, PC2, color = Group, label = Sample)) +
+#  geom_point(size = 2) + theme_bw(base_size = 14) +
+#  labs(title = "PCA – Kanonik ifade (RMA ± ComBat)")
 
-um <- umap::umap(t(expr_mat), n_neighbors = 8, random_state = 123)
-ump_df <- data.frame(
-  Sample = colnames(expr_mat),
-  UMAP1  = um$layout[,1],
-  UMAP2  = um$layout[,2]
-)
-ump_df$Group <- pheno_aligned$group[match(ump_df$Sample, rownames(pheno_aligned))]
+#um <- umap::umap(t(expr_mat), n_neighbors = 8, random_state = 123)
+#ump_df <- data.frame(
+#  Sample = colnames(expr_mat),
+#  UMAP1  = um$layout[,1],
+#  UMAP2  = um$layout[,2]
+#)
+#ump_df$Group <- pheno_aligned$group[match(ump_df$Sample, rownames(pheno_aligned))]
 
-p_umap <- ggplot(ump_df, aes(UMAP1, UMAP2, color = Group, label = Sample)) +
-  geom_point(size = 2) + theme_minimal(base_size = 13) +
-  labs(title = "UMAP – Kanonik ifade (RMA ± ComBat)")
+#p_umap <- ggplot(ump_df, aes(UMAP1, UMAP2, color = Group, label = Sample)) +
+#  geom_point(size = 2) + theme_minimal(base_size = 13) +
+#  labs(title = "UMAP – Kanonik ifade (RMA ± ComBat)")
 
 ## 7) (Opsiyonel) no-MELAS GSEA
 if (exists("tt_gene_s")) {
+
   ranks_s <- tt_gene_s %>%
     filter(!is.na(SYMBOL), SYMBOL != "", is.finite(t)) %>%
     mutate(SYMBOL = toupper(SYMBOL)) %>%
@@ -467,6 +468,177 @@ if (exists("tt_gene_s")) {
     )
   } else message("no-MELAS GSEA atlandı: yeterli rank yok.")
 }
+
+
+
+
+## ====== 0) Kurulum ve kontroller ======
+suppressPackageStartupMessages({
+  library(ggplot2)
+  library(dplyr)
+  library(ggrepel)
+  library(umap)
+  library(clusterProfiler)
+  library(enrichplot)
+  library(cowplot)  # plot_grid
+})
+
+stopifnot(is.matrix(expr_mat), !is.null(colnames(expr_mat)))
+stopifnot(exists("pheno_aligned"), is.data.frame(pheno_aligned))
+stopifnot(identical(colnames(expr_mat), rownames(pheno_aligned)))
+
+# Çıktı klasörü
+out_dir <- file.path(getwd(), "results", "QC_GSEA")
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+## ====== 1) PCA (örnek-temelli; kolonlar örnek) ======
+set.seed(123)
+pca_obj <- prcomp(t(expr_mat), scale. = TRUE, center = TRUE)
+
+# Açıklanan varyans
+var_exp <- (pca_obj$sdev^2) / sum(pca_obj$sdev^2)
+pc1_var <- round(100 * var_exp[1], 1)
+pc2_var <- round(100 * var_exp[2], 1)
+
+pca_df <- data.frame(
+  PC1    = pca_obj$x[, 1],
+  PC2    = pca_obj$x[, 2],
+  Group  = pheno_aligned$group,
+  Sample = rownames(pheno_aligned),
+  check.names = FALSE
+)
+
+p_pca <- ggplot(pca_df, aes(PC1, PC2, color = Group)) +
+  stat_ellipse(type = "norm", linewidth = 0.5, alpha = 0.3, show.legend = FALSE) +
+  geom_point(size = 2.2, alpha = 0.9) +
+  # Etiketleri aç/kapat: aşağıdaki satırı yorumdan çıkarın
+  # PCA etiketi
+  ggrepel::geom_text_repel(aes(label = Sample), size = 3,
+                                            max.overlaps = Inf, show.legend = FALSE) +
+
+  theme_bw(base_size = 13) +
+  labs(
+    title = "PCA — Kanonik ifade (RMA ± ComBat)",
+    x = sprintf("PC1 (%.1f%%)", pc1_var),
+    y = sprintf("PC2 (%.1f%%)", pc2_var),
+    caption = "Örnekler kolon, gen/problar satır varsayımıyla t(expr_mat) kullanıldı."
+  ) +
+  guides(color = guide_legend(override.aes = list(size = 4)))
+
+print(p_pca)
+
+## ====== 2) UMAP ======
+# Not: umap::umap girdisi satırlar = gözlem, sütunlar = özellik
+set.seed(123)
+um <- umap(t(expr_mat), n_neighbors = 8, random_state = 123, metric = "euclidean")
+um_df <- data.frame(
+  Sample = colnames(expr_mat),
+  UMAP1  = um$layout[, 1],
+  UMAP2  = um$layout[, 2],
+  Group  = pheno_aligned$group[match(colnames(expr_mat), rownames(pheno_aligned))],
+  check.names = FALSE
+)
+
+p_umap <- ggplot(um_df, aes(UMAP1, UMAP2, color = Group)) +
+  stat_ellipse(type = "norm", linewidth = 0.5, alpha = 0.3, show.legend = FALSE) +
+  geom_point(size = 2.2, alpha = 0.9) +
+  # Etiketleri aç/kapat: aşağıdaki satırı yorumdan çıkarın
+# UMAP etiketi
+ggrepel::geom_text_repel(aes(label = Sample), size = 3,
+                                            max.overlaps = Inf, show.legend = FALSE) +
+  theme_minimal(base_size = 13) +
+  labs(
+    title = "UMAP — Kanonik ifade (RMA ± ComBat)",
+    caption = "n_neighbors=8; Öneri: Küçük n için 5–15 arasında duyarlılık analizi yapın."
+  ) +
+  guides(color = guide_legend(override.aes = list(size = 4)))
+
+## ====== 3) Kaydet (PNG + PDF) ======
+ggsave(file.path(out_dir, "QC_PCA.png"),  p_pca, width = 6.5, height = 5.2, dpi = 300)
+ggsave(file.path(out_dir, "QC_PCA.pdf"),  p_pca, width = 6.5, height = 5.2)
+
+ggsave(file.path(out_dir, "QC_UMAP.png"), p_umap, width = 6.5, height = 5.2, dpi = 300)
+ggsave(file.path(out_dir, "QC_UMAP.pdf"), p_umap, width = 6.5, height = 5.2)
+
+## ====== 4) (Opsiyonel) no-MELAS GSEA ======
+# Beklenenler:
+# - tt_gene_s: en azından kolonları "SYMBOL" ve "t" içeren tablo (no-MELAS karşılaştırması)
+# - term2gene: data.frame( term = ..., gene = ... ) yapısında kullanıcı tanımlı gen seti haritası
+p_gsea_dot <- p_gsea_le <- NULL
+
+if (exists("tt_gene_s") && is.data.frame(tt_gene_s) &&
+    all(c("SYMBOL","t") %in% names(tt_gene_s)) &&
+    exists("term2gene") && is.data.frame(term2gene) &&
+    all(c("term","gene") %in% names(term2gene))) {
+  
+  ranks_s <- tt_gene_s %>%
+    filter(!is.na(SYMBOL), SYMBOL != "", is.finite(t)) %>%
+    mutate(SYMBOL = toupper(SYMBOL)) %>%
+    arrange(desc(abs(t))) %>%
+    { setNames(.$t, .$SYMBOL) }
+  
+  # En az 50 gen isabeti olsun
+  common_s <- intersect(names(ranks_s), term2gene$gene)
+  
+  if (length(common_s) >= 50) {
+    set.seed(123)
+    gsea_h_s <- GSEA(
+      geneList  = ranks_s[common_s],
+      TERM2GENE = term2gene[term2gene$gene %in% common_s, ],
+      pvalueCutoff = 1,     # rapor amaçlı üst sınır; daha sonra filtreleyebilirsiniz
+      verbose   = FALSE
+    )
+    
+    # Sonuç varsa görselleştir
+    if (nrow(as.data.frame(gsea_h_s)) > 0) {
+      # 4a) Dotplot (ilk 20 yolak)
+      p_gsea_dot <- dotplot(gsea_h_s, showCategory = 20, split = NULL) +
+        theme_bw(base_size = 12) +
+        labs(title = "no-MELAS GSEA — Enriched Pathways (Dotplot)")
+      
+      # 4b) En iyi yolak için leading-edge eğrisi
+      top_id <- gsea_h_s@result %>%
+        arrange(p.adjust) %>%
+        slice(1) %>% pull(ID)
+      
+      if (length(top_id) == 1 && !is.na(top_id)) {
+        p_gsea_le <- gseaplot2(gsea_h_s, geneSetID = top_id, pvalue_table = TRUE) +
+          labs(title = paste0("Leading-edge — ", top_id))
+      }
+      
+      # Kaydet
+      if (!is.null(p_gsea_dot))
+        ggsave(file.path(out_dir, "GSEA_noMELAS_Dotplot.png"), p_gsea_dot,
+               width = 7, height = 5.5, dpi = 300)
+      if (!is.null(p_gsea_le))
+        ggsave(file.path(out_dir, "GSEA_noMELAS_LeadingEdge.png"), p_gsea_le,
+               width = 7, height = 5.5, dpi = 300)
+      
+      # Rapor için kombine görsel
+      if (!is.null(p_gsea_dot) && !is.null(p_gsea_le)) {
+        combo <- plot_grid(p_gsea_dot, p_gsea_le, ncol = 2, rel_widths = c(1, 1.2))
+        ggsave(file.path(out_dir, "GSEA_noMELAS_Combined.png"), combo,
+               width = 12, height = 5.5, dpi = 300)
+      }
+    } else {
+      message("GSEA: anlamlı yolak bulunamadı (p.adj filtrelerine bakınız).")
+    }
+  } else {
+    message("no-MELAS GSEA atlandı: ortak rütbe >= 50 koşulu sağlanmadı.")
+  }
+} else {
+  message("GSEA atlandı: 'tt_gene_s' (SYMBOL,t) ve/veya 'term2gene'(term,gene) bulunamadı.")
+}
+
+## ====== 5) QC özet panelini de almak isterseniz ======
+qc_panel <- plot_grid(p_pca, p_umap, ncol = 2)
+ggsave(file.path(out_dir, "QC_Panel_PCA_UMAP.png"), qc_panel,
+       width = 12, height = 5.5, dpi = 300)
+
+
+
+
+
 
 ## 8) (Opsiyonel) multiMiR – validated hedefler
 # Eğer 'safe_multimir_table' tanımlı DEĞİLSE, aşağıdaki örnek çalışır:
@@ -503,8 +675,8 @@ suppressPackageStartupMessages({ library(multiMiR); library(dplyr); library(R.ut
 get_validated_mm <- function(targets,
                              # bu kaynaklara sonradan 'database' ile filtre uygular
                              sources = c("mirtarbase","mirecords","tarbase"),
-                             chunk_size = 10,
-                             timeout_sec = 1000) {
+                             chunk_size = 500,
+                             timeout_sec = 120) {
   tg <- unique(na.omit(toupper(as.character(targets))))
   if (!length(tg)) return(NULL)
   
@@ -553,7 +725,7 @@ get_validated_mm <- function(targets,
 universe_set <- unique(tt_gene$SYMBOL[!is.na(tt_gene$SYMBOL) & tt_gene$adj.P.Val < FDR_THRESH])
 universe_set <- toupper(universe_set)
 
-mm_val <- get_validated_mm(universe_set, chunk_size = 10, timeout_sec = 1000)
+mm_val <- get_validated_mm(universe_set, chunk_size = 500, timeout_sec = 120)
 
 if (is.null(mm_val) || !nrow(mm_val)) {
   message("Validated sonuc gelmedi (ag/surum k olabilir).")
